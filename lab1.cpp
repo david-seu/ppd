@@ -186,8 +186,8 @@ int main() {
         accounts.emplace_back(std::make_shared<Account>(i, initial_balance));
     }
 
-    int num_threads = 8;
-    int num_operations_per_thread = 12500;
+    int num_threads = 4;
+    int num_operations_per_thread = 25000;
 
     std::vector<std::thread> threads;
 

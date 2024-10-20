@@ -17,8 +17,8 @@
 - **Total Operations**: 100,000
 - **Operations per Thread**: Total Operations / Number of Threads
 - **Granularity of Locking**:
-  - **Fine-Grained Locking**: Each account has its own mutex.
-  - **Coarse-Grained Locking**: A single global mutex protects all account operations.
+  - **Fine-Grained Locking**: Each account has its own mutex, and the mutexes are locked for the entire duration of the `transfer` function, including balance updates and log updates. This ensures thread safety and has lower overhead in locking operations.
+  - **Finer-Grained Locking**: Locks are applied only around critical sections (balance updates and log updates) and are held only for the minimal necessary time. However, this approach introduces additional overhead due to more frequent lock acquisitions and releases.
 
 ## Tests Conducted
 
@@ -34,14 +34,14 @@
 | Number of Threads | Operations per Thread | Execution Time (ms) | Speedup |
 |-------------------|-----------------------|---------------------|---------|
 | 1                 | 100,000               | 2,344               | 1.0×    |
-| 2                 | 50,000                | 1,269               | 1.92×   |
+| 2                 | 50,000                | 1,269               | 1.85×   |
 | 4                 | 25,000                | 1,348               | 1.74×   |
 | 8                 | 12,500                | 1,332               | 1.76×   |
 
 **Observations**:
 
-- **Increased Threads Improve Performance**: Execution time decreases as the number of threads increases, particularly from 1 to 2 threads, showing significant speedup.
-- **Diminishing Returns with 4+ Threads**: The performance gains from increasing the number of threads start to taper off after 2 threads. The speedup from 2 to 4 threads is minimal, and going up to 8 threads shows little improvement.
+- **Increased Threads Improve Performance**: Execution time decreases as the number of threads increases, especially from 1 to 2 threads.
+- **Diminishing Returns with More Threads**: Performance gains taper off beyond 2 threads due to overhead from context switching and synchronization.
 
 ### Test 2: Varying Granularity of Locking
 
@@ -49,32 +49,36 @@
 
 - **Number of Accounts**: 100
 - **Number of Threads**: 4
-- **Operations per Thread**: 250,000
+- **Operations per Thread**: 25,000
 
 **Results**:
 
-| Locking Granularity | Execution Time (ms) |
-|---------------------|---------------------|
-| Fine-Grained        | 1,300               |
-| Coarse-Grained      | 5,700               |
+| Locking Granularity   | Execution Time (ms) |
+|-----------------------|---------------------|
+| Fine-Grained Locking  | 3,558               |
+| Finer-Grained Locking | 3,979               |
 
 **Observations**:
 
-- **Fine-Grained Locking is More Efficient**: Execution time with fine-grained locking is significantly lower.
-- **Coarse-Grained Locking Causes Contention**: A global mutex introduces bottlenecks, reducing concurrency.
+- **Fine-Grained Locking is More Efficient**: Execution time with fine-grained locking is lower.
+- **Finer-Grained Locking Introduces Overhead**: Although locks are held for shorter durations, the increased number of lock operations leads to higher overhead, resulting in longer execution times.
 
 ## Performance Analysis
 
 ### Execution Time vs. Number of Threads
 
-- **Overhead Considerations**: Context switching and synchronization overhead limit scalability.
+- **Scalability Limits**: While adding more threads can reduce execution time, the benefits decrease due to synchronization overhead and context switching.
 
-### Fine-Grained vs. Coarse-Grained Locking
+### Fine-Grained vs. Finer-Grained Locking
 
 - **Fine-Grained Locking Advantages**:
-  - Allows concurrent transactions on different accounts without interference.
-  - Reduces wait times for mutex acquisition.
-- **Coarse-Grained Locking Disadvantages**:
-  - Serializes access to all accounts.
-  - Significantly increases execution time due to high contention.
+  - **Lower Lock Overhead**: Locks are acquired and released fewer times since they cover the entire `transfer` function.
+  - **Simplicity**: Easier to implement and reason about, reducing the risk of concurrency bugs.
+  - **Better Performance**: In this test, fine-grained locking resulted in faster execution times due to lower overhead.
+
+- **Finer-Grained Locking Disadvantages**:
+  - **Higher Lock Overhead**: Increased number of lock acquisitions and releases can lead to higher CPU usage and longer execution times.
+  - **Complexity**: More complex code with multiple critical sections, increasing the potential for errors.
+  - **Reduced Performance**: Despite allowing more concurrency theoretically, the overhead outweighs the benefits in this scenario.
+
 ---
