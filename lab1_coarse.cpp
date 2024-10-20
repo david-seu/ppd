@@ -10,6 +10,8 @@
 #include <memory>
 #include <fstream>  // For file operations
 #include <sstream>  // For building file names
+#include <map>      // For account-pair mutex map
+#include <utility>  // For std::pair
 
 struct OperationRecord {
     unsigned int serial_number;
@@ -23,13 +25,23 @@ public:
     int id; // Unique identifier
     int balance;
     std::vector<OperationRecord> log;
-    std::mutex mtx;
 
     Account(int id_, int initial_balance) : id(id_), balance(initial_balance) {}
 };
 
-std::vector<std::shared_ptr<Account>> accounts; // Use shared_ptr instead of Account objects
+// Shared data
+std::vector<std::shared_ptr<Account>> accounts;
 std::atomic<unsigned int> serial_number(0);
+
+// Mutex for each account pair
+std::map<std::pair<int, int>, std::mutex> account_pair_mutexes;
+std::mutex map_mutex; // Mutex to protect access to the account_pair_mutexes map
+
+std::mutex& get_account_pair_mutex(int id1, int id2) {
+    std::lock_guard<std::mutex> lg(map_mutex);
+    std::pair<int, int> key = (id1 < id2) ? std::make_pair(id1, id2) : std::make_pair(id2, id1);
+    return account_pair_mutexes[key];
+}
 
 void transfer(int from_id, int to_id, int amount) {
     if (from_id == to_id) return;
@@ -38,14 +50,11 @@ void transfer(int from_id, int to_id, int amount) {
     Account& from_account = *accounts[from_id];
     Account& to_account = *accounts[to_id];
 
-    // Lock accounts in consistent order to avoid deadlocks
-    if (from_id < to_id) {
-        from_account.mtx.lock();
-        to_account.mtx.lock();
-    } else {
-        to_account.mtx.lock();
-        from_account.mtx.lock();
-    }
+    // Get the mutex for the account pair
+    std::mutex& pair_mtx = get_account_pair_mutex(from_id, to_id);
+
+    // Lock the account pair mutex
+    std::lock_guard<std::mutex> lg(pair_mtx);
 
     // Perform the transfer
     from_account.balance -= amount;
@@ -60,10 +69,6 @@ void transfer(int from_id, int to_id, int amount) {
     // Append the operation record to both accounts' logs
     from_account.log.push_back(op_record);
     to_account.log.push_back(op_record);
-
-    // Unlock the accounts
-    from_account.mtx.unlock();
-    to_account.mtx.unlock();
 }
 
 void worker_thread(int num_operations, int num_accounts) {
@@ -84,9 +89,9 @@ void worker_thread(int num_operations, int num_accounts) {
 void perform_consistency_check(int initial_balance) {
     bool consistent = true;
 
-    // Lock all accounts for consistency check
+    // Lock all account mutexes for consistency check
     for (auto& account_ptr : accounts) {
-        account_ptr->mtx.lock();
+        // No mutexes to lock per account in this version
     }
 
     // Check balances and logs
@@ -128,9 +133,9 @@ void perform_consistency_check(int initial_balance) {
         }
     }
 
-    // Unlock accounts
+    // Unlock account mutexes
     for (auto& account_ptr : accounts) {
-        account_ptr->mtx.unlock();
+        // No mutexes to unlock per account in this version
     }
 
     if (consistent) {
@@ -145,8 +150,7 @@ void write_account_logs_to_files() {
     for (auto& account_ptr : accounts) {
         Account& account = *account_ptr;
 
-        // Lock the account mutex
-        std::lock_guard<std::mutex> lg(account.mtx);
+        // No need to lock account mutexes here as no per-account mutexes exist
 
         // Sort the account's log based on serial number
         std::sort(account.log.begin(), account.log.end(), [](const OperationRecord& a, const OperationRecord& b) {
@@ -186,8 +190,8 @@ int main() {
         accounts.emplace_back(std::make_shared<Account>(i, initial_balance));
     }
 
-    int num_threads = 8;
-    int num_operations_per_thread = 12500;
+    int num_threads = 2;
+    int num_operations_per_thread = 50000; // Total operations = 100,000
 
     std::vector<std::thread> threads;
 
