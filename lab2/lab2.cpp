@@ -22,7 +22,7 @@ std::queue<long long> buffer;
 // Flags to indicate production and consumption status
 bool production_complete = false;
 
-// Accumulated sum (use a larger data type to prevent overflow)
+// Accumulated sum
 long long sum = 0;
 
 // Producer function
