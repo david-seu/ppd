@@ -1,4 +1,11 @@
 .vscode
-lab1
-lab1_finer
 account_*
+.venv
+out/
+*.iml
+obj
+bin
+*.csproj
+*.sln
+.idea
+

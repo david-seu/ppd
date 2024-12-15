@@ -8,12 +8,10 @@
 #include <random>
 #include <cassert>
 
-// Shared resources
 std::mutex mtx;
 std::condition_variable cond_var_producer;
 std::condition_variable cond_var_consumer;
 
-// Bounded buffer size
 const size_t BUFFER_SIZE = 1000;
 
 // Buffer to hold products
@@ -25,7 +23,6 @@ bool production_complete = false;
 // Accumulated sum
 long long sum = 0;
 
-// Producer function
 void producer(const std::vector<int>& A, const std::vector<int>& B) {
     size_t size_vectors = A.size();
 
@@ -53,7 +50,6 @@ void producer(const std::vector<int>& A, const std::vector<int>& B) {
     cond_var_consumer.notify_one();
 }
 
-// Consumer function
 void consumer() {
     while (true) {
         std::unique_lock<std::mutex> lock(mtx);
@@ -79,7 +75,6 @@ void consumer() {
 }
 
 int main() {
-    // Define the size of the vectors (e.g., 10 million elements)
     const size_t VECTOR_SIZE = 10000000;
 
     // Initialize vectors A and B with random integers
@@ -87,7 +82,7 @@ int main() {
     std::vector<int> B(VECTOR_SIZE);
 
     // Use random number generation for vector initialization
-    std::mt19937 rng(42); // Fixed seed for reproducibility
+    std::mt19937 rng(42);
     std::uniform_int_distribution<int> dist(1, 100);
 
     for (size_t i = 0; i < VECTOR_SIZE; ++i) {
