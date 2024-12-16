@@ -11,8 +11,6 @@ public class HamiltonianCycleFinder {
     private final ReentrantLock solutionLock = new ReentrantLock();
     private final AtomicBoolean solutionFound = new AtomicBoolean(false);
 
-    private ExecutorService executor = null;
-
     private static final int PARALLEL_SEARCH_DEPTH = 3;
 
     public HamiltonianCycleFinder(Graph graph, int startingNode) {
@@ -20,15 +18,14 @@ public class HamiltonianCycleFinder {
         this.startingNode = startingNode;
     }
 
-    public List<Integer> findCycleConcurrently() throws InterruptedException {
+    public List<Integer> findCycleConcurrently() {
         resetSearchState();
-        executor = Executors.newCachedThreadPool();
-
-        LinkedHashSet<Integer> visited = new LinkedHashSet<>();
-        depthFirstSearchConcurrent(startingNode, 0, visited);
-
-        executor.shutdown();
-        executor.awaitTermination(60, TimeUnit.SECONDS);
+        ForkJoinPool forkJoinPool = new ForkJoinPool();
+        try {
+            forkJoinPool.invoke(new HamiltonianCycleTask(startingNode, 0, new LinkedHashSet<>()));
+        } finally {
+            forkJoinPool.shutdown();
+        }
         return solutionPath;
     }
 
@@ -39,30 +36,70 @@ public class HamiltonianCycleFinder {
         return solutionPath;
     }
 
-    private void depthFirstSearchConcurrent(int node, int depth, LinkedHashSet<Integer> visited) {
-        if (solutionFound.get()) return;
+    private class HamiltonianCycleTask extends RecursiveTask<Boolean> {
+        private final int node;
+        private final int depth;
+        private final LinkedHashSet<Integer> visited;
 
-        visited.add(node);
+        public HamiltonianCycleTask(int node, int depth, LinkedHashSet<Integer> visited) {
+            this.node = node;
+            this.depth = depth;
+            this.visited = visited;
+        }
 
-        if (isAllNodesVisited(visited) && canCloseCycle(node)) {
-            recordSolution(visited);
+        @Override
+        protected Boolean compute() {
+            if (solutionFound.get()) return false;
+
+            visited.add(node);
+
+            if (isAllNodesVisited(visited) && canCloseCycle(node)) {
+                recordSolution(visited);
+                visited.remove(node);
+                return true;
+            }
+
+            List<Integer> neighbors = graph.getNeighbors(node);
+            if (neighbors.isEmpty()) {
+                visited.remove(node);
+                return false;
+            }
+
+            List<HamiltonianCycleTask> subTasks = new ArrayList<>();
+
+            if (shouldSpawnParallelTasks(depth, neighbors)) {
+                for (Integer next : neighbors) {
+                    if (solutionFound.get()) break;
+                    if (!visited.contains(next)) {
+                        LinkedHashSet<Integer> branchVisited = new LinkedHashSet<>(visited);
+                        HamiltonianCycleTask task = new HamiltonianCycleTask(next, depth + 1, branchVisited);
+                        task.fork();
+                        subTasks.add(task);
+                    }
+                }
+
+                for (HamiltonianCycleTask task : subTasks) {
+                    if (solutionFound.get()) break;
+                    boolean found = task.join();
+                    if (found) {
+                        return true;
+                    }
+                }
+            } else {
+                for (Integer next : neighbors) {
+                    if (solutionFound.get()) break;
+                    if (!visited.contains(next)) {
+                        boolean found = new HamiltonianCycleTask(next, depth + 1, new LinkedHashSet<>(visited)).compute();
+                        if (found) {
+                            return true;
+                        }
+                    }
+                }
+            }
+
             visited.remove(node);
-            return;
+            return solutionFound.get();
         }
-
-        List<Integer> neighbors = graph.getNeighbors(node);
-        if (neighbors.isEmpty()) {
-            visited.remove(node);
-            return;
-        }
-
-        if (shouldSpawnParallelTasks(depth, neighbors)) {
-            spawnParallelTasksForNeighbors(depth, visited, neighbors);
-        } else {
-            searchNeighborsSerially(visited, neighbors);
-        }
-
-        visited.remove(node);
     }
 
     private void depthFirstSearchSerial(int node, LinkedHashSet<Integer> visited) {
@@ -86,41 +123,6 @@ public class HamiltonianCycleFinder {
         visited.remove(node);
     }
 
-    private void spawnParallelTasksForNeighbors(int depth, LinkedHashSet<Integer> visited, List<Integer> neighbors) {
-        List<Future<?>> futures = new ArrayList<>();
-        for (Integer next : neighbors) {
-            if (solutionFound.get()) break;
-            if (!visited.contains(next)) {
-                LinkedHashSet<Integer> branchVisited = new LinkedHashSet<>(visited);
-                futures.add(executor.submit(() -> depthFirstSearchConcurrent(next, depth + 1, branchVisited)));
-            }
-        }
-        waitForFutures(futures);
-    }
-
-    private void searchNeighborsSerially(LinkedHashSet<Integer> visited, List<Integer> neighbors) {
-        for (Integer next : neighbors) {
-            if (solutionFound.get()) break;
-            if (!visited.contains(next)) {
-                depthFirstSearchSerial(next, visited);
-            }
-        }
-    }
-
-    private void waitForFutures(List<Future<?>> futures) {
-        for (Future<?> future : futures) {
-            if (solutionFound.get()) break;
-            try {
-                future.get();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            } catch (ExecutionException e) {
-                e.printStackTrace();
-            }
-        }
-    }
-
     private boolean isAllNodesVisited(Set<Integer> visited) {
         return visited.size() == graph.getVertexCount();
     }
@@ -135,6 +137,7 @@ public class HamiltonianCycleFinder {
             try {
                 solutionPath.clear();
                 solutionPath.addAll(visited);
+                solutionPath.add(startingNode);
             } finally {
                 solutionLock.unlock();
             }
@@ -142,7 +145,7 @@ public class HamiltonianCycleFinder {
     }
 
     private boolean shouldSpawnParallelTasks(int depth, List<Integer> neighbors) {
-        return executor != null && depth < PARALLEL_SEARCH_DEPTH && neighbors.size() > 1;
+        return depth < PARALLEL_SEARCH_DEPTH && neighbors.size() > 1;
     }
 
     private void resetSearchState() {
