@@ -1,182 +1,84 @@
 #include <iostream>
-#include <fstream>
 #include <vector>
 #include <mpi.h>
-#include <ctime>
-#include <cstdint>
-#include <cstdio>
 #include <cassert>
 #include <algorithm>
+#include <cstdlib>
 
 using namespace std;
 
 const int MAXVALUE = 100;
 
-/**
- * @brief Brute force multiplication of two polynomials a and b.
- * 
- * @param a Input polynomial A.
- * @param b Input polynomial B.
- * @param ret Output array for the result (size must be at least 2*n).
- * @param n Size of A and B.
- */
-void brute(const int *a, const int *b, int *ret, int n) {
-    for (int i = 0; i < 2 * n; ++i) {
-        ret[i] = 0;
-    }
+// Brute force polynomial multiplication
+inline void brute(const int *a, const int *b, int *ret, int n) {
+    fill(ret, ret + 2 * n - 1, 0); // Corrected to 2n -1
     for (int i = 0; i < n; ++i) {
-        int ai = a[i];
         for (int j = 0; j < n; ++j) {
-            ret[i + j] += ai * b[j];
+            ret[i + j] += a[i] * b[j];
         }
     }
 }
 
-/**
- * @brief Karatsuba multiplication of polynomials.
- * 
- * Uses extra space in ret to store intermediate sums for recursion. The layout:
- * - x1 at ret[n*0]
- * - x2 at ret[n*1]
- * - x3 at ret[n*2]
- * - asum at ret[n*5]
- * - bsum at ret[n*5 + n/2]
- *
- * @param a Input polynomial A.
- * @param b Input polynomial B.
- * @param ret Workspace and output, must have size at least 6*n.
- * @param n Size of A and B (power-of-two padded).
- */
-void karatsuba(int *a, int *b, int *ret, int n) {
+// Karatsuba polynomial multiplication
+void karatsuba(const int *a, const int *b, int *ret, int n) {
     if (n <= 4) {
         brute(a, b, ret, n);
         return;
     }
 
-    int half = n / 2;
-    int *ar = a;
-    int *al = a + half;
-    int *br = b;
-    int *bl = b + half;
+    int mid = n / 2;
+    // Allocate temporary storage with size 2*mid -1
+    vector<int> x1(2 * mid - 1, 0);
+    vector<int> x2(2 * mid - 1, 0);
+    vector<int> x3(2 * mid - 1, 0);
+    vector<int> asum(mid, 0);
+    vector<int> bsum(mid, 0);
 
-    int *asum = &ret[5 * n];       // sum of a's halves
-    int *bsum = &ret[5 * n + half];// sum of b's halves
-    int *x1   = &ret[0 * n];       // ar*br
-    int *x2   = &ret[1 * n];       // al*bl
-    int *x3   = &ret[2 * n];       // (ar+al)*(br+bl)
-
-    for (int i = 0; i < half; ++i) {
-        asum[i] = ar[i] + al[i];
-        bsum[i] = br[i] + bl[i];
+    // Calculate a_low + a_high and b_low + b_high
+    for (int i = 0; i < mid; ++i) {
+        asum[i] = a[i] + a[mid + i];
+        bsum[i] = b[i] + b[mid + i];
     }
 
-    karatsuba(ar, br, x1, half);
-    karatsuba(al, bl, x2, half);
-    karatsuba(asum, bsum, x3, half);
+    // Recursive calls
+    karatsuba(a, b, x1.data(), mid);
+    karatsuba(a + mid, b + mid, x2.data(), mid);
+    karatsuba(asum.data(), bsum.data(), x3.data(), mid);
 
-    for (int i = 0; i < n; i++) {
-        x3[i] = x3[i] - x1[i] - x2[i];
+    // Combine results
+    for (int i = 0; i < 2 * mid - 1; ++i) {
+        x3[i] -= x1[i] + x2[i];
     }
 
-    for (int i = 0; i < n; i++) {
-        ret[i + half] += x3[i];
+    // Assemble the final result
+    fill(ret, ret + 2 * n - 1, 0); // Corrected to 2n -1
+    for (int i = 0; i < 2 * mid - 1; ++i) {
+        ret[i] += x1[i];
+        ret[mid + i] += x3[i];
+        ret[2 * mid + i] += x2[i];
     }
 }
 
-/**
- * @brief Generate two polynomials of size n with random coefficients [0,99].
- */
+// Generate random polynomials
 void generate_poly(vector<int> &a, vector<int> &b, unsigned n) {
-    a.resize(n);
-    b.resize(n);
+    a.resize(n, 0);
+    b.resize(n, 0);
     for (unsigned i = 0; i < n; ++i) {
         a[i] = rand() % MAXVALUE;
         b[i] = rand() % MAXVALUE;
     }
 }
 
-/**
- * @brief Send work from master to slaves.
- * 
- * Master sends the full polynomial B and the partial segment of A needed for each slave.
- */
-void send_work(const vector<int> &a, const vector<int> &b, int nrProcs) {
-    int n = (int) a.size();
-    for (int rank = 1; rank < nrProcs; ++rank) {
-        int st = rank * n / nrProcs;
-        int dr = (int)min<unsigned>(n, (unsigned)((rank + 1) * n / nrProcs));
-        MPI_Send(&n, 1, MPI_INT, rank, 0, MPI_COMM_WORLD);
-        MPI_Send(&st, 1, MPI_INT, rank, 1, MPI_COMM_WORLD);
-        MPI_Send(&dr, 1, MPI_INT, rank, 2, MPI_COMM_WORLD);
-        MPI_Send(a.data() + st, dr - st, MPI_INT, rank, 3, MPI_COMM_WORLD);
-        MPI_Send(b.data(), n, MPI_INT, rank, 4, MPI_COMM_WORLD);
-    }
+// Check the result
+void check_result(const vector<int> &a, const vector<int> &b, const vector<int> &res) {
+    vector<int> expected(a.size() + b.size() - 1, 0);
+    for (size_t i = 0; i < a.size(); ++i)
+        for (size_t j = 0; j < b.size(); ++j)
+            expected[i + j] += a[i] * b[j];
+    assert(expected.size() == res.size());
+    for (size_t i = 0; i < expected.size(); ++i)
+        assert(expected[i] == res[i]);
 }
-
-/**
- * @brief Compute the result using Karatsuba on the master's assigned segment.
- */
-void master_compute(int st, int dr, const vector<int> &a, const vector<int> &b, vector<int> &res) {
-    // Since this code currently just does the full karatsuba on the entire A and B,
-    // the st and dr parameters are not used to limit computation.
-    karatsuba((int*)a.data(), (int*)b.data(), res.data(), (int)a.size());
-}
-
-/**
- * @brief Collect results from slaves and accumulate them into the master result.
- */
-void collect(int n, int nrProcs, vector<int> &res) {
-    vector<int> aux(2 * n - 1);
-    for (int rank = 1; rank < nrProcs; ++rank) {
-        MPI_Status status;
-        MPI_Recv(aux.data(), (int)aux.size(), MPI_INT, rank, 5, MPI_COMM_WORLD, &status);
-        for (size_t i = 0; i < aux.size(); ++i) {
-            res[i] += aux[i];
-        }
-    }
-}
-
-/**
- * @brief Check correctness by brute force and assert correctness.
- */
-void verify_result(const vector<int> &a, const vector<int> &b, const vector<int> &res) {
-    vector<int> check(a.size() + b.size() - 1, 0);
-    for (size_t i = 0; i < a.size(); ++i) {
-        int ai = a[i];
-        for (size_t j = 0; j < b.size(); ++j) {
-            check[i + j] += ai * b[j];
-        }
-    }
-    assert(check.size() == res.size());
-    for (size_t i = 0; i < check.size(); ++i) {
-        assert(check[i] == res[i]);
-    }
-}
-
-/**
- * @brief Slave process routine: receive assigned segment and compute partial results.
- */
-void slave_process(int me) {
-    int n, st, dr;
-    MPI_Status status;
-    MPI_Recv(&n, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
-    MPI_Recv(&st, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &status);
-    MPI_Recv(&dr, 1, MPI_INT, 0, 2, MPI_COMM_WORLD, &status);
-
-    vector<int> a(n, 0);
-    vector<int> b(n, 0);
-    MPI_Recv(a.data() + st, dr - st, MPI_INT, 0, 3, MPI_COMM_WORLD, &status);
-    MPI_Recv(b.data(), n, MPI_INT, 0, 4, MPI_COMM_WORLD, &status);
-
-    // Prepare result array
-    vector<int> res(6 * n, 0);
-    // Compute full karatsuba - no partial logic implemented here, it computes full and merges later
-    karatsuba(a.data(), b.data(), res.data(), n);
-
-    // Send partial results (2*n - 1 is the final poly length)
-    MPI_Send(res.data(), 2 * n - 1, MPI_INT, 0, 5, MPI_COMM_WORLD);
-}
-
 
 int main(int argc, char *argv[]) {
     MPI_Init(&argc, &argv);
@@ -184,58 +86,113 @@ int main(int argc, char *argv[]) {
     int me, nrProcs;
     MPI_Comm_rank(MPI_COMM_WORLD, &me);
     MPI_Comm_size(MPI_COMM_WORLD, &nrProcs);
-    srand((unsigned)time(NULL) + me);
-
-    if (argc != 2) {
-        if (me == 0) {
-            fprintf(stderr, "usage: mpi_kar <n>\n");
-        }
-        MPI_Finalize();
-        return 1;
-    }
 
     unsigned int n;
-    if (sscanf(argv[1], "%u", &n) != 1) {
+    if (argc != 2 || sscanf(argv[1], "%u", &n) != 1) {
         if (me == 0) {
-            fprintf(stderr, "Invalid input\n");
+            fprintf(stderr, "Usage: mpi_karatsuba <n>\n");
         }
         MPI_Finalize();
         return 1;
     }
 
+    // Ensure n is a power of two for Karatsuba
+    unsigned int original_n = n;
+    if ((n & (n - 1)) != 0) {
+        unsigned int power = 1;
+        while (power < n) power <<= 1;
+        n = power;
+    }
+
+    vector<int> a, b, res;
     if (me == 0) {
-        // Master process
-        vector<int> a, b;
-        generate_poly(a, b, n);
+        generate_poly(a, b, original_n);
+        // Pad with zeros to the next power of two
+        a.resize(n, 0);
+        b.resize(n, 0);
+        fprintf(stderr, "> Master: Input generated and padded to %u\n", n);
+    }
 
-        // Pad n to next power of two if needed
-        while (n & (n - 1)) {
-            ++n;
-            a.push_back(0);
-            b.push_back(0);
+    // Broadcast the padded size to all processes
+    MPI_Bcast(&n, 1, MPI_UNSIGNED, 0, MPI_COMM_WORLD);
+
+    // Resize vectors on all processes
+    if (me != 0) { // Non-master processes need to resize
+        a.resize(n, 0);
+        b.resize(n, 0);
+    }
+
+    // Calculate send counts and displacements for 'a'
+    vector<int> send_counts(nrProcs, n / nrProcs);
+    vector<int> displs(nrProcs, 0);
+    int remainder = n % nrProcs;
+    for (int i = 0; i < remainder; ++i) {
+        send_counts[i]++;
+    }
+    for (int i = 1; i < nrProcs; ++i) {
+        displs[i] = displs[i - 1] + send_counts[i - 1];
+    }
+
+    // Allocate receive buffer for each process
+    int local_n = send_counts[me];
+    vector<int> local_a_chunk(local_n, 0);
+
+    // Scatter 'a' polynomial
+    MPI_Scatterv(a.data(), send_counts.data(), displs.data(), MPI_INT,
+                 local_a_chunk.data(), local_n, MPI_INT, 0, MPI_COMM_WORLD);
+
+    // Broadcast 'b' polynomial to all processes
+    MPI_Bcast(b.data(), n, MPI_INT, 0, MPI_COMM_WORLD);
+
+    // Each process prepares a padded 'a' with its chunk positioned correctly
+    vector<int> local_a_padded(n, 0);
+    for(int i = 0; i < local_n; ++i){
+        local_a_padded[displs[me] + i] = local_a_chunk[i];
+    }
+
+    // Perform Karatsuba multiplication
+    // The result size is 2n -1
+    vector<int> local_res(2 * n - 1, 0); // Corrected to 2n -1
+    karatsuba(local_a_padded.data(), b.data(), local_res.data(), n); // n is the size after padding
+
+    // Gather all partial results to the master
+    // Each partial result is of size 2n -1
+    vector<int> all_partial_res;
+    if (me == 0) {
+        all_partial_res.resize(nrProcs * (2 * n - 1), 0);
+    }
+
+    MPI_Gather(local_res.data(), 2 * n - 1, MPI_INT,
+               all_partial_res.data(), 2 * n - 1, MPI_INT,
+               0, MPI_COMM_WORLD);
+
+    if (me == 0) {
+        // Initialize the final result vector
+        res.assign(2 * n - 1, 0);
+
+        // Sum all partial results with proper offsets
+        for (int p = 0; p < nrProcs; ++p) {
+            int st = displs[p];
+            for(unsigned int i = 0; i < 2 * n - 1; ++i){
+                if (st + i < res.size()) { // Prevent out-of-bounds
+                    res[st + i] += all_partial_res[p * (2 * n - 1) + i];
+                }
+            }
         }
 
-        send_work(a, b, nrProcs);
+        // Check the result
+        check_result(a, b, res);
 
-        int st = 0;
-        int dr = (nrProcs > 1) ? (int)(n / nrProcs) : (int)n;
-        vector<int> aux(a);
-        // Zero out unused part of aux
-        for (int i = dr; i < (int)aux.size(); ++i) {
-            aux[i] = 0;
+        // Optionally, print a success message
+        cout << "Polynomial multiplication successful and verified.\n";
+
+        // Optionally, print the result
+        /*
+        for (size_t i = 0; i < res.size(); ++i) {
+            cout << res[i] << ' ';
         }
-
-        vector<int> res(6 * n, 0);
-        master_compute(st, dr, aux, b, res);
-        collect(n, nrProcs, res);
-
-        // Resize to final size of polynomial (2*n - 1)
-        res.resize(2 * n - 1);
-        verify_result(a, b, res);
-        cout << "Result verified successfully.\n";
-    } else {
-        // Slave process
-        slave_process(me);
+        cout << endl;
+        */
     }
 
     MPI_Finalize();
