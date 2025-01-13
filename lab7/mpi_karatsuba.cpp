@@ -1,198 +1,191 @@
 #include <iostream>
 #include <vector>
-#include <mpi.h>
-#include <cassert>
+#include <random>
+#include <chrono>
 #include <algorithm>
-#include <cstdlib>
+#include "mpi.h"
 
-using namespace std;
-
-const int MAXVALUE = 100;
-
-// Brute force polynomial multiplication
-inline void brute(const int *a, const int *b, int *ret, int n) {
-    fill(ret, ret + 2 * n - 1, 0); // Corrected to 2n -1
-    for (int i = 0; i < n; ++i) {
-        for (int j = 0; j < n; ++j) {
-            ret[i + j] += a[i] * b[j];
-        }
-    }
+// Function to generate a random integer vector
+std::vector<int> generate_random_vector(size_t size, int min_value = 0, int max_value = 100) {
+    std::random_device rand_dev;
+    std::mt19937 rand_gen(rand_dev());
+    std::uniform_int_distribution<int> dist(min_value, max_value);
+    std::vector<int> rand_vec(size);
+    std::generate(rand_vec.begin(), rand_vec.end(), [&]() { return dist(rand_gen); });
+    return rand_vec;
 }
 
-// Karatsuba polynomial multiplication
-void karatsuba(const int *a, const int *b, int *ret, int n) {
-    if (n <= 4) {
-        brute(a, b, ret, n);
+// Naive multiplication of two vectors
+std::vector<int> multiply_naive(const std::vector<int>& vec_a, const std::vector<int>& vec_b) {
+    size_t size_a = vec_a.size(), size_b = vec_b.size();
+    std::vector<int> result(size_a + size_b - 1, 0);
+    for (size_t i = 0; i < size_a; ++i) {
+        for (size_t j = 0; j < size_b; ++j) {
+            result[i + j] += vec_a[i] * vec_b[j];
+        }
+    }
+    return result;
+}
+
+// Karatsuba multiplication of two vectors
+std::vector<int> multiply_karatsuba(const std::vector<int>& vec_a, const std::vector<int>& vec_b) {
+    int size = vec_a.size();
+    if (size < 64) return multiply_naive(vec_a, vec_b);
+
+    int mid = size / 2;
+    std::vector<int> vec_a_low(vec_a.begin(), vec_a.begin() + mid);
+    std::vector<int> vec_a_high(vec_a.begin() + mid, vec_a.end());
+    std::vector<int> vec_b_low(vec_b.begin(), vec_b.begin() + mid);
+    std::vector<int> vec_b_high(vec_b.begin() + mid, vec_b.end());
+
+    auto low_result = multiply_karatsuba(vec_a_low, vec_b_low);
+    auto high_result = multiply_karatsuba(vec_a_high, vec_b_high);
+
+    std::vector<int> vec_a_sum(vec_a_low.size(), 0), vec_b_sum(vec_b_low.size(), 0);
+    for (int i = 0; i < mid; ++i) {
+        vec_a_sum[i] = vec_a_low[i] + vec_a_high[i];
+        vec_b_sum[i] = vec_b_low[i] + vec_b_high[i];
+    }
+
+    auto middle_result = multiply_karatsuba(vec_a_sum, vec_b_sum);
+    std::vector<int> result(2 * size - 1, 0);
+
+    for (size_t i = 0; i < low_result.size(); ++i) result[i] += low_result[i];
+    for (size_t i = 0; i < high_result.size(); ++i) result[i + 2 * mid] += high_result[i];
+    for (size_t i = 0; i < middle_result.size(); ++i) {
+        int temp = middle_result[i];
+        if (i < low_result.size()) temp -= low_result[i];
+        if (i < high_result.size()) temp -= high_result[i];
+        result[i + mid] += temp;
+    }
+
+    return result;
+}
+
+// Recursive Karatsuba multiplication using MPI
+void karatsuba_recursive_mpi(const std::vector<int>& vec_a, const std::vector<int>& vec_b,
+                             int rank, int process_count, std::vector<int>& result) {
+    int size = vec_a.size();
+    if (size == 1) {
+        result[0] = vec_a[0] * vec_b[0];
         return;
     }
 
-    int mid = n / 2;
-    // Allocate temporary storage with size 2*mid -1
-    vector<int> x1(2 * mid - 1, 0);
-    vector<int> x2(2 * mid - 1, 0);
-    vector<int> x3(2 * mid - 1, 0);
-    vector<int> asum(mid, 0);
-    vector<int> bsum(mid, 0);
+    int mid = size / 2, mid_left = size - mid;
+    std::vector<int> vec_a_low(vec_a.begin(), vec_a.begin() + mid);
+    std::vector<int> vec_a_high(vec_a.begin() + mid, vec_a.end());
+    std::vector<int> vec_b_low(vec_b.begin(), vec_b.begin() + mid);
+    std::vector<int> vec_b_high(vec_b.begin() + mid, vec_b.end());
 
-    // Calculate a_low + a_high and b_low + b_high
-    for (int i = 0; i < mid; ++i) {
-        asum[i] = a[i] + a[mid + i];
-        bsum[i] = b[i] + b[mid + i];
+    std::vector<int> low_result(2 * mid - 1, 0);
+    std::vector<int> high_result(2 * mid_left - 1, 0);
+    std::vector<int> middle_result(2 * mid_left - 1, 0);
+
+    std::vector<int> vec_a_sum(mid_left, 0), vec_b_sum(mid_left, 0);
+    for (int i = 0; i < mid_left; ++i) {
+        vec_a_sum[i] = (i < mid ? vec_a_low[i] : 0) + (i < static_cast<int>(vec_a_high.size()) ? vec_a_high[i] : 0);
+        vec_b_sum[i] = (i < mid ? vec_b_low[i] : 0) + (i < static_cast<int>(vec_b_high.size()) ? vec_b_high[i] : 0);
     }
 
-    // Recursive calls
-    karatsuba(a, b, x1.data(), mid);
-    karatsuba(a + mid, b + mid, x2.data(), mid);
-    karatsuba(asum.data(), bsum.data(), x3.data(), mid);
+    int child1 = rank + process_count / 3;
+    int child2 = rank + 2 * process_count / 3;
+    int size1 = child2 - child1;
+    int size2 = (rank + process_count) - child2;
 
-    // Combine results
-    for (int i = 0; i < 2 * mid - 1; ++i) {
-        x3[i] -= x1[i] + x2[i];
+    if (process_count == 2) {
+        MPI_Send(&mid, 1, MPI_INT, child2, 0, MPI_COMM_WORLD);
+        int zero = 0;
+        MPI_Send(&zero, 1, MPI_INT, child2, 0, MPI_COMM_WORLD);
+        MPI_Send(vec_a_low.data(), mid, MPI_INT, child2, 0, MPI_COMM_WORLD);
+        MPI_Send(vec_b_low.data(), mid, MPI_INT, child2, 0, MPI_COMM_WORLD);
+
+        high_result = multiply_karatsuba(vec_a_high, vec_b_high);
+        middle_result = multiply_karatsuba(vec_a_sum, vec_b_sum);
+
+        MPI_Status status;
+        MPI_Recv(low_result.data(), static_cast<int>(low_result.size()), MPI_INT, child2, 0,
+                 MPI_COMM_WORLD, &status);
+    } else if (child1 < process_count && child2 < process_count) {
+        MPI_Send(&mid, 1, MPI_INT, child1, 0, MPI_COMM_WORLD);
+        MPI_Send(&mid_left, 1, MPI_INT, child2, 0, MPI_COMM_WORLD);
+        MPI_Send(&size1, 1, MPI_INT, child1, 0, MPI_COMM_WORLD);
+        MPI_Send(&size2, 1, MPI_INT, child2, 0, MPI_COMM_WORLD);
+
+        MPI_Send(vec_a_low.data(), mid, MPI_INT, child1, 0, MPI_COMM_WORLD);
+        MPI_Send(vec_b_low.data(), mid, MPI_INT, child1, 0, MPI_COMM_WORLD);
+
+        MPI_Send(vec_a_high.data(), mid_left, MPI_INT, child2, 0, MPI_COMM_WORLD);
+        MPI_Send(vec_b_high.data(), mid_left, MPI_INT, child2, 0, MPI_COMM_WORLD);
+
+        middle_result = multiply_karatsuba(vec_a_sum, vec_b_sum);
+
+        MPI_Status status;
+        MPI_Recv(low_result.data(), static_cast<int>(low_result.size()), MPI_INT, child1, 0, MPI_COMM_WORLD, &status);
+        MPI_Recv(high_result.data(), static_cast<int>(high_result.size()), MPI_INT, child2, 0, MPI_COMM_WORLD, &status);
+    } else {
+        low_result = multiply_karatsuba(vec_a_low, vec_b_low);
+        high_result = multiply_karatsuba(vec_a_high, vec_b_high);
+        middle_result = multiply_karatsuba(vec_a_sum, vec_b_sum);
     }
 
-    // Assemble the final result
-    fill(ret, ret + 2 * n - 1, 0); // Corrected to 2n -1
-    for (int i = 0; i < 2 * mid - 1; ++i) {
-        ret[i] += x1[i];
-        ret[mid + i] += x3[i];
-        ret[2 * mid + i] += x2[i];
+    for (size_t i = 0; i < low_result.size(); ++i) result[i] += low_result[i];
+    for (size_t i = 0; i < high_result.size(); ++i) result[i + 2 * mid] += high_result[i];
+    for (size_t i = 0; i < middle_result.size(); ++i) {
+        int temp = middle_result[i];
+        if (i < low_result.size()) temp -= low_result[i];
+        if (i < high_result.size()) temp -= high_result[i];
+        result[i + mid] += temp;
     }
 }
 
-// Generate random polynomials
-void generate_poly(vector<int> &a, vector<int> &b, unsigned n) {
-    a.resize(n, 0);
-    b.resize(n, 0);
-    for (unsigned i = 0; i < n; ++i) {
-        a[i] = rand() % MAXVALUE;
-        b[i] = rand() % MAXVALUE;
-    }
+// MPI worker for Karatsuba multiplication
+void karatsuba_mpi_worker(int rank) {
+    MPI_Status status;
+    int data_size = 0, new_size = 0;
+
+    MPI_Recv(&data_size, 1, MPI_INT, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
+    int parent = status.MPI_SOURCE;
+    MPI_Recv(&new_size, 1, MPI_INT, parent, 0, MPI_COMM_WORLD, &status);
+
+    std::vector<int> vec_a(data_size), vec_b(data_size);
+    MPI_Recv(vec_a.data(), data_size, MPI_INT, parent, 0, MPI_COMM_WORLD, &status);
+    MPI_Recv(vec_b.data(), data_size, MPI_INT, parent, 0, MPI_COMM_WORLD, &status);
+
+    std::vector<int> result(2 * data_size - 1, 0);
+    karatsuba_recursive_mpi(vec_a, vec_b, rank, new_size, result);
+
+    MPI_Send(result.data(), static_cast<int>(result.size()), MPI_INT, parent, 0, MPI_COMM_WORLD);
 }
 
-// Check the result
-void check_result(const vector<int> &a, const vector<int> &b, const vector<int> &res) {
-    vector<int> expected(a.size() + b.size() - 1, 0);
-    for (size_t i = 0; i < a.size(); ++i)
-        for (size_t j = 0; j < b.size(); ++j)
-            expected[i + j] += a[i] * b[j];
-    assert(expected.size() == res.size());
-    for (size_t i = 0; i < expected.size(); ++i)
-        assert(expected[i] == res[i]);
-}
-
-int main(int argc, char *argv[]) {
+int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
 
-    int me, nrProcs;
-    MPI_Comm_rank(MPI_COMM_WORLD, &me);
-    MPI_Comm_size(MPI_COMM_WORLD, &nrProcs);
+    int rank, process_count;
+    MPI_Comm_size(MPI_COMM_WORLD, &process_count);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    unsigned int n;
-    if (argc != 2 || sscanf(argv[1], "%u", &n) != 1) {
-        if (me == 0) {
-            fprintf(stderr, "Usage: mpi_karatsuba <n>\n");
-        }
-        MPI_Finalize();
-        return 1;
-    }
+    int data_size = 10000;
 
-    // Ensure n is a power of two for Karatsuba
-    unsigned int original_n = n;
-    if ((n & (n - 1)) != 0) {
-        unsigned int power = 1;
-        while (power < n) power <<= 1;
-        n = power;
-    }
+    if (rank == 0) {
+        std::vector<int> vec_a = generate_random_vector(data_size);
+        std::vector<int> vec_b = generate_random_vector(data_size);
 
-    vector<int> a, b, res;
-    if (me == 0) {
-        generate_poly(a, b, original_n);
-        // Pad with zeros to the next power of two
-        a.resize(n, 0);
-        b.resize(n, 0);
-        fprintf(stderr, "> Master: Input generated and padded to %u\n", n);
-    }
+        auto start_time = std::chrono::high_resolution_clock::now();
+        std::vector<int> result(2 * data_size - 1, 0);
+        karatsuba_recursive_mpi(vec_a, vec_b, rank, process_count, result);
+        auto end_time = std::chrono::high_resolution_clock::now();
+        std::cout << "MPI Karatsuba Time: " 
+                  << std::chrono::duration<double>(end_time - start_time).count() << " seconds\n";
 
-    // Broadcast the padded size to all processes
-    MPI_Bcast(&n, 1, MPI_UNSIGNED, 0, MPI_COMM_WORLD);
+        start_time = std::chrono::high_resolution_clock::now();
+        auto naive_result = multiply_naive(vec_a, vec_b);
+        end_time = std::chrono::high_resolution_clock::now();
+        std::cout << "Naive Multiplication Time: " 
+                  << std::chrono::duration<double>(end_time - start_time).count() << " seconds\n";
 
-    // Resize vectors on all processes
-    if (me != 0) { // Non-master processes need to resize
-        a.resize(n, 0);
-        b.resize(n, 0);
-    }
-
-    // Calculate send counts and displacements for 'a'
-    vector<int> send_counts(nrProcs, n / nrProcs);
-    vector<int> displs(nrProcs, 0);
-    int remainder = n % nrProcs;
-    for (int i = 0; i < remainder; ++i) {
-        send_counts[i]++;
-    }
-    for (int i = 1; i < nrProcs; ++i) {
-        displs[i] = displs[i - 1] + send_counts[i - 1];
-    }
-
-    // Allocate receive buffer for each process
-    int local_n = send_counts[me];
-    vector<int> local_a_chunk(local_n, 0);
-
-    // Scatter 'a' polynomial
-    MPI_Scatterv(a.data(), send_counts.data(), displs.data(), MPI_INT,
-                 local_a_chunk.data(), local_n, MPI_INT, 0, MPI_COMM_WORLD);
-
-    // Broadcast 'b' polynomial to all processes
-    MPI_Bcast(b.data(), n, MPI_INT, 0, MPI_COMM_WORLD);
-
-    // Each process prepares a padded 'a' with its chunk positioned correctly
-    vector<int> local_a_padded(n, 0);
-    for(int i = 0; i < local_n; ++i){
-        local_a_padded[displs[me] + i] = local_a_chunk[i];
-    }
-
-    // Perform Karatsuba multiplication
-    // The result size is 2n -1
-    vector<int> local_res(2 * n - 1, 0); // Corrected to 2n -1
-    karatsuba(local_a_padded.data(), b.data(), local_res.data(), n); // n is the size after padding
-
-    // Gather all partial results to the master
-    // Each partial result is of size 2n -1
-    vector<int> all_partial_res;
-    if (me == 0) {
-        all_partial_res.resize(nrProcs * (2 * n - 1), 0);
-    }
-
-    MPI_Gather(local_res.data(), 2 * n - 1, MPI_INT,
-               all_partial_res.data(), 2 * n - 1, MPI_INT,
-               0, MPI_COMM_WORLD);
-
-    if (me == 0) {
-        // Initialize the final result vector
-        res.assign(2 * n - 1, 0);
-
-        // Sum all partial results with proper offsets
-        for (int p = 0; p < nrProcs; ++p) {
-            int st = displs[p];
-            for(unsigned int i = 0; i < 2 * n - 1; ++i){
-                if (st + i < res.size()) { // Prevent out-of-bounds
-                    res[st + i] += all_partial_res[p * (2 * n - 1) + i];
-                }
-            }
-        }
-
-        // Check the result
-        check_result(a, b, res);
-
-        // Optionally, print a success message
-        cout << "Polynomial multiplication successful and verified.\n";
-
-        // Optionally, print the result
-        /*
-        for (size_t i = 0; i < res.size(); ++i) {
-            cout << res[i] << ' ';
-        }
-        cout << endl;
-        */
+        std::cout << "Results equal: " << std::boolalpha << (result == naive_result) << "\n";
+    } else {
+        karatsuba_mpi_worker(rank);
     }
 
     MPI_Finalize();
